@@ -1,0 +1,298 @@
+import {
+	IDataObject,
+	type IExecuteFunctions,
+	type INodeExecutionData,
+	INodeType,
+	INodeTypeDescription,
+	NodeConnectionType,
+	ResourceMapperField,
+	// NodeOperationError,
+} from 'n8n-workflow';
+import { GrpcReflection } from 'grpc-js-reflection-client';
+
+const grpc = require('@grpc/grpc-js');
+import {
+	fieldsForMethod,
+	methodsInService,
+	protobufFieldToN8NMapperType,
+	protobufFieldToN8NOptions,
+	protoStringToRoot,
+	servicesFromProto,
+} from './gRPCInspect';
+import { Root } from 'protobufjs';
+
+export class gRPCNode implements INodeType {
+	description: INodeTypeDescription = {
+		displayName: 'gRPC',
+		name: 'grpc',
+		group: ['output'],
+		version: 1,
+		icon: 'file:grpc.svg',
+		description: 'Makes a gRPC service call',
+		defaults: {
+			name: 'gRPC',
+		},
+		inputs: [NodeConnectionType.Main],
+		outputs: [NodeConnectionType.Main],
+		usableAsTool: true,
+		// credentials: [
+		// 	{
+		// 		name: 'gprcCredentials',
+		// 		required: false,
+		// 	},
+		// ],
+		properties: [
+			{
+				displayName: 'URL',
+				name: 'location',
+				type: 'string',
+				default: '',
+				noDataExpression: true,
+				placeholder: 'service.com:443',
+				description: 'The URL where the service is exposed',
+				required: true,
+			},
+			{
+				displayName: 'Protobuf definition',
+				name: 'protoSource',
+				type: 'options',
+				required: true,
+				default: 'auto',
+				noDataExpression: true,
+				options: [
+					{
+						name: 'Automatic',
+						value: 'auto',
+						description: 'Fetch from the server (via Reflection service)',
+					},
+					{
+						name: 'From URL',
+						value: 'url',
+						description: 'Fetch the .proto file from a URL',
+					},
+					{
+						name: 'From .proto file',
+						value: 'text',
+						description: 'Provide the .proto file as text',
+					},
+				],
+			},
+			{
+				displayName: '.proto URL',
+				description: "Provide a URL that exposes this service's .proto file",
+				name: 'protoURL',
+				type: 'string',
+				required: false,
+				default: '',
+				displayOptions: {
+					show: {
+						protoSource: ['url'],
+					},
+				},
+			},
+			{
+				displayName: '.proto text',
+				description: "Provide the contents of this service's .proto file",
+				name: 'protoText',
+				type: 'string',
+				required: false,
+				default: '',
+				typeOptions: {
+					rows: 4,
+				},
+				displayOptions: {
+					show: {
+						protoSource: ['text'],
+					},
+				},
+			},
+			{
+				displayName: 'Service',
+				name: 'service',
+				type: 'options',
+				required: true,
+				default: '',
+				typeOptions: {
+					loadOptionsMethod: 'getServices',
+				},
+			},
+			{
+				displayName: 'Method',
+				name: 'method',
+				type: 'options',
+				required: true,
+				default: '',
+				typeOptions: {
+					loadOptionsMethod: 'getMethods',
+					loadOptionsDependsOn: ['service'],
+				},
+				displayOptions: {
+					show: {
+						service: [{ _cnd: { exists: true } }],
+					},
+				},
+			},
+			{
+				displayName: 'Fields',
+				name: 'rpcFields',
+				type: 'resourceMapper',
+				default: {
+					mappingMode: 'defineBelow',
+					value: null,
+				},
+				required: true,
+				typeOptions: {
+					loadOptionsDependsOn: ['service', 'method'],
+					resourceMapper: {
+						mode: 'add',
+						resourceMapperMethod: 'getFields',
+						fieldWords: {
+							singular: 'field',
+							plural: 'fields',
+						},
+						addAllFields: true,
+						noFieldsError: 'This method has no fields!',
+						supportAutoMap: true,
+					},
+				},
+			},
+		],
+	};
+
+	methods: INodeType['methods'] = {
+		loadOptions: {
+			async getServices() {
+				let names: string[] = [];
+				const mode = this.getNodeParameter('protoSource', 'auto') as 'auto' | 'url' | 'text';
+				switch (mode) {
+					case 'auto':
+						const location = this.getNodeParameter('location') as string;
+						const client = new GrpcReflection(location, grpc.ChannelCredentials.createInsecure());
+						names = await client.listServices();
+						break;
+					case 'url':
+						names = servicesFromProto(
+							await this.helpers.httpRequest({
+								method: 'GET',
+								url: this.getNodeParameter('protoURL') as string,
+							}),
+						);
+						break;
+					case 'text':
+						names = servicesFromProto(this.getNodeParameter('protoText') as string);
+						break;
+				}
+
+				return names.map((n) => ({ name: n, value: n }));
+			},
+			async getMethods() {
+				const mode = this.getNodeParameter('protoSource', 'auto') as 'auto' | 'url' | 'text';
+				const service = this.getNodeParameter('service') as string;
+
+				let methods: string[] = [];
+				switch (mode) {
+					case 'auto':
+						const location = this.getNodeParameter('location') as string;
+						const client = new GrpcReflection(location, grpc.ChannelCredentials.createInsecure());
+						methods = (await client.listMethods(service)).map((m) => m.name);
+						break;
+					case 'url':
+						methods = methodsInService(
+							await this.helpers.httpRequest({
+								method: 'GET',
+								url: this.getNodeParameter('protoURL') as string,
+							}),
+							service,
+						);
+						break;
+					case 'text':
+						methods = methodsInService(this.getNodeParameter('protoText') as string, service);
+				}
+
+				return methods.map((m) => ({ name: m, value: m }));
+			},
+		},
+		resourceMapping: {
+			async getFields() {
+				const mode = this.getNodeParameter('protoSource', 'auto') as 'auto' | 'url' | 'text';
+				const service = this.getNodeParameter('service') as string;
+
+				let root: Root;
+				switch (mode) {
+					case 'auto':
+						const location = this.getNodeParameter('location') as string;
+						const client = new GrpcReflection(location, grpc.ChannelCredentials.createInsecure());
+						root = (await client.getDescriptorBySymbol(`${service}`)).getProtobufJsRoot();
+						break;
+					case 'url':
+						root = protoStringToRoot(
+							await this.helpers.httpRequest({
+								method: 'GET',
+								url: this.getNodeParameter('protoURL') as string,
+							}),
+						);
+						break;
+					case 'text':
+						root = protoStringToRoot(this.getNodeParameter('protoText') as string);
+				}
+
+				const method = this.getNodeParameter('method') as string;
+				const protobufFields = fieldsForMethod(root, service, method);
+				const fields = protobufFields.map((f): ResourceMapperField => {
+					return {
+						id: f.name,
+						displayName: f.comment ? `${f.name} - ${f.comment}` : f.name,
+						defaultMatch: false,
+						required: !f.optional,
+						display: true,
+						type: protobufFieldToN8NMapperType(f),
+						options: protobufFieldToN8NOptions(f),
+					};
+				});
+				return { fields };
+			},
+		},
+	};
+
+	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
+		const items = this.getInputData();
+		const location = this.getNodeParameter('location', 0) as string;
+
+		for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+			const service = this.getNodeParameter('service', itemIndex) as string;
+			const method = this.getNodeParameter('method', itemIndex) as string;
+			// @ts-ignore
+			const fields = this.getNodeParameter('rpcFields.value', itemIndex, []) as IDataObject[];
+
+			console.log('FIELDS', fields);
+			this.logger.debug('RUNNING', { location, service, method, fields });
+			// try {
+			// let item = items[itemIndex];
+			// const location = this.getNodeParameter('location', itemIndex, '') as string;
+			// const client = new GrpcReflection(location);
+			// const methods = await client.listServices();
+			// item = items[itemIndex];
+			// item.json.availableMethods = methods;
+			// } catch (error) {
+			// 	// This node should never fail but we want to showcase how
+			// 	// to handle errors.
+			// 	if (this.continueOnFail()) {
+			// 		items.push({ json: this.getInputData(itemIndex)[0].json, error, pairedItem: itemIndex });
+			// 	} else {
+			// 		// Adding `itemIndex` allows other workflows to handle this error
+			// 		if (error.context) {
+			// 			// If the error thrown already contains the context property,
+			// 			// only append the itemIndex
+			// 			error.context.itemIndex = itemIndex;
+			// 			throw error;
+			// 		}
+			// 		throw new NodeOperationError(this.getNode(), error, {
+			// 			itemIndex,
+			// 		});
+			// 	}
+			// }
+		}
+
+		return [items];
+	}
+}

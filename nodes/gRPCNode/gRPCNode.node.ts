@@ -13,7 +13,6 @@ import { GrpcReflection } from 'grpc-js-reflection-client';
 const grpc = require('@grpc/grpc-js');
 import {
 	fieldsForMethod,
-	jsonToProtobufFields,
 	methodsInService,
 	protobufFieldToN8NMapperType,
 	protobufFieldToN8NOptions,
@@ -164,6 +163,47 @@ export class gRPCNode implements INodeType {
 					},
 				},
 			},
+			{
+				displayName: 'Options',
+				name: 'options',
+				type: 'collection',
+				placeholder: 'Add option',
+				default: {},
+				options: [
+					{
+						displayName: 'Headers',
+						name: 'headers',
+						type: 'fixedCollection',
+						typeOptions: {
+							multipleValues: true,
+						},
+						placeholder: 'Add Header',
+						default: {
+							headers: [{ name: '', value: '' }],
+						},
+						options: [
+							{
+								name: 'headers',
+								displayName: 'Parameter',
+								values: [
+									{
+										displayName: 'Name',
+										name: 'name',
+										type: 'string',
+										default: '',
+									},
+									{
+										displayName: 'Value',
+										name: 'value',
+										type: 'string',
+										default: '',
+									},
+								],
+							},
+						],
+					},
+				],
+			},
 		],
 	};
 
@@ -268,13 +308,12 @@ export class gRPCNode implements INodeType {
 		const service = this.getNodeParameter('service', 0) as string;
 		const method = this.getNodeParameter('method', 0) as string;
 		const mode = this.getNodeParameter('protoSource', 0, 'auto') as 'auto' | 'url' | 'text';
-		let root: Root, protoText: string, pkg: PackageDefinition;
+		let protoText: string, pkg: PackageDefinition;
 		switch (mode) {
 			case 'auto':
 				const location = this.getNodeParameter('location', 0) as string;
 				const client = new GrpcReflection(location, grpc.ChannelCredentials.createInsecure());
 				const descriptor = await client.getDescriptorBySymbol(`${service}`);
-				root = descriptor.getProtobufJsRoot();
 				pkg = descriptor.getPackageDefinition();
 				break;
 			case 'url':
@@ -282,12 +321,10 @@ export class gRPCNode implements INodeType {
 					method: 'GET',
 					url: this.getNodeParameter('protoURL', 0) as string,
 				});
-				root = protoStringToRoot(protoText);
 				pkg = protoStringToPackage(protoText);
 				break;
 			case 'text':
 				protoText = this.getNodeParameter('protoText', 0) as string;
-				root = protoStringToRoot(protoText);
 				pkg = protoStringToPackage(protoText);
 		}
 
@@ -295,12 +332,15 @@ export class gRPCNode implements INodeType {
 		for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
 			// try {
 			const fields = this.getNodeParameter('rpcFields.value', itemIndex, []) as IDataObject;
-			const message = jsonToProtobufFields(root, service, method, fields);
-			console.log('FIELDS', fields, ' =>', message);
-			this.logger.debug('RUNNING', { location, service, method, fields });
 
-			const resp = await sendMessageToServer(location, service, method, pkg, fields);
-			this.logger.debug('RESP', { x: resp });
+			const headers = this.getNodeParameter('options.headers.headers', itemIndex, []) as [
+				{
+					name: string;
+					value: string;
+				},
+			];
+
+			const resp = await sendMessageToServer(location, service, method, pkg, fields, headers ?? []);
 			outputItems.push(
 				resp.map((x) => ({
 					json: x,

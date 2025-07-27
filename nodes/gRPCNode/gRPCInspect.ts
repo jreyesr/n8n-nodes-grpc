@@ -5,6 +5,7 @@ const protoLoader = require('@grpc/proto-loader');
 import type { AnyDefinition, PackageDefinition, ServiceDefinition } from '@grpc/proto-loader';
 import { Enum, Field, MapField, parse as protoParse, Root, Type } from 'protobufjs';
 import { ServiceClient } from '@grpc/grpc-js/build/src/make-client';
+import { Metadata } from '@grpc/grpc-js';
 
 // Insomnia uses this logic to distinguish Services from messages&enums inside packages
 // https://github.com/Kong/insomnia/blob/3bcf4f7f3277a5dacce237b97c49425873174f11/packages/insomnia/src/main/ipc/grpc.ts#L320-L338
@@ -106,6 +107,7 @@ export async function sendMessageToServer(
 	method: string,
 	pkg: PackageDefinition,
 	message: any,
+	headers: [{ name: string; value: string }],
 ): Promise<any[]> {
 	// e.g. grpcbin.GRPCBin, last period separates package from service
 	const separator = service.lastIndexOf('.');
@@ -123,6 +125,11 @@ export async function sendMessageToServer(
 			// unary request, data is passed as function argument
 			args.push(message);
 		}
+		if (headers.length > 0) {
+			const metadata = new Metadata();
+			headers.forEach((h) => metadata.add(h.name, h.value));
+			args.push(metadata);
+		}
 		if (!(pkg[service] as ServiceDefinition)[method].responseStream) {
 			// unary response, handled via callback on the method call
 			// this is the exit point for unary-response RPCs
@@ -137,6 +144,7 @@ export async function sendMessageToServer(
 		// (x) => stream<y> 				 	client[method](x); call.on(data, resolve(data))
 		// (stream<x>) => y					 	client.method((err, resp) => resolve(resp)); call.write(x); call.end()
 		// (stream<x>) => stream<y>	 	client[method](); call.write(x); call.end(); call.on(data, resolve(data))
+		// if headers exist, they are passed between the data and the callback
 		const call = client[method](...args);
 
 		if ((pkg[service] as ServiceDefinition)[method].requestStream) {

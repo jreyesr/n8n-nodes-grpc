@@ -13,13 +13,17 @@ import { GrpcReflection } from 'grpc-js-reflection-client';
 const grpc = require('@grpc/grpc-js');
 import {
 	fieldsForMethod,
+	jsonToProtobufFields,
 	methodsInService,
 	protobufFieldToN8NMapperType,
 	protobufFieldToN8NOptions,
+	protoStringToPackage,
 	protoStringToRoot,
+	sendMessageToServer,
 	servicesFromProto,
 } from './gRPCInspect';
 import { Root } from 'protobufjs';
+import { PackageDefinition } from '@grpc/proto-loader';
 
 export class gRPCNode implements INodeType {
 	description: INodeTypeDescription = {
@@ -83,6 +87,7 @@ export class gRPCNode implements INodeType {
 				name: 'protoURL',
 				type: 'string',
 				required: false,
+				noDataExpression: true,
 				default: '',
 				displayOptions: {
 					show: {
@@ -96,6 +101,7 @@ export class gRPCNode implements INodeType {
 				name: 'protoText',
 				type: 'string',
 				required: false,
+				noDataExpression: true,
 				default: '',
 				typeOptions: {
 					rows: 4,
@@ -111,6 +117,7 @@ export class gRPCNode implements INodeType {
 				name: 'service',
 				type: 'options',
 				required: true,
+				noDataExpression: true,
 				default: '',
 				typeOptions: {
 					loadOptionsMethod: 'getServices',
@@ -121,6 +128,7 @@ export class gRPCNode implements INodeType {
 				name: 'method',
 				type: 'options',
 				required: true,
+				noDataExpression: true,
 				default: '',
 				typeOptions: {
 					loadOptionsMethod: 'getMethods',
@@ -257,22 +265,50 @@ export class gRPCNode implements INodeType {
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		const items = this.getInputData();
 		const location = this.getNodeParameter('location', 0) as string;
+		const service = this.getNodeParameter('service', 0) as string;
+		const method = this.getNodeParameter('method', 0) as string;
+		const mode = this.getNodeParameter('protoSource', 0, 'auto') as 'auto' | 'url' | 'text';
+		let root: Root, protoText: string, pkg: PackageDefinition;
+		switch (mode) {
+			case 'auto':
+				const location = this.getNodeParameter('location', 0) as string;
+				const client = new GrpcReflection(location, grpc.ChannelCredentials.createInsecure());
+				const descriptor = await client.getDescriptorBySymbol(`${service}`);
+				root = descriptor.getProtobufJsRoot();
+				pkg = descriptor.getPackageDefinition();
+				break;
+			case 'url':
+				protoText = await this.helpers.httpRequest({
+					method: 'GET',
+					url: this.getNodeParameter('protoURL', 0) as string,
+				});
+				root = protoStringToRoot(protoText);
+				pkg = protoStringToPackage(protoText);
+				break;
+			case 'text':
+				protoText = this.getNodeParameter('protoText', 0) as string;
+				root = protoStringToRoot(protoText);
+				pkg = protoStringToPackage(protoText);
+		}
 
+		const outputItems: INodeExecutionData[][] = [];
 		for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
-			const service = this.getNodeParameter('service', itemIndex) as string;
-			const method = this.getNodeParameter('method', itemIndex) as string;
-			// @ts-ignore
-			const fields = this.getNodeParameter('rpcFields.value', itemIndex, []) as IDataObject[];
-
-			console.log('FIELDS', fields);
-			this.logger.debug('RUNNING', { location, service, method, fields });
 			// try {
-			// let item = items[itemIndex];
-			// const location = this.getNodeParameter('location', itemIndex, '') as string;
-			// const client = new GrpcReflection(location);
-			// const methods = await client.listServices();
-			// item = items[itemIndex];
-			// item.json.availableMethods = methods;
+			const fields = this.getNodeParameter('rpcFields.value', itemIndex, []) as IDataObject;
+			const message = jsonToProtobufFields(root, service, method, fields);
+			console.log('FIELDS', fields, ' =>', message);
+			this.logger.debug('RUNNING', { location, service, method, fields });
+
+			const resp = await sendMessageToServer(location, service, method, pkg, fields);
+			this.logger.debug('RESP', { x: resp });
+			outputItems.push(
+				resp.map((x) => ({
+					json: x,
+					pairedItem: {
+						item: itemIndex,
+					},
+				})),
+			);
 			// } catch (error) {
 			// 	// This node should never fail but we want to showcase how
 			// 	// to handle errors.
@@ -293,6 +329,6 @@ export class gRPCNode implements INodeType {
 			// }
 		}
 
-		return [items];
+		return [outputItems.flat()];
 	}
 }

@@ -10,9 +10,9 @@ import {
 } from 'n8n-workflow';
 import { GrpcReflection } from 'grpc-js-reflection-client';
 
-const grpc = require('@grpc/grpc-js');
 import {
 	fieldsForMethod,
+	makeGrpcCredFromNode,
 	methodsInService,
 	protobufFieldToN8NMapperType,
 	protobufFieldToN8NOptions,
@@ -202,6 +202,44 @@ export class gRPCNode implements INodeType {
 							},
 						],
 					},
+					{
+						displayName: 'TLS',
+						name: 'tls',
+						type: 'fixedCollection',
+						typeOptions: {
+							multipleValues: false,
+						},
+						default: { tls: {} },
+						options: [
+							{
+								displayName: 'TLS',
+								name: 'tls',
+								values: [
+									{
+										displayName: 'Enable',
+										name: 'enableTls',
+										default: true,
+										noDataExpression: true,
+										type: 'boolean',
+									},
+									{
+										displayName: 'Ignore Issues (Insecure)',
+										name: 'ignoreIssues',
+										default: false,
+										noDataExpression: true,
+										type: 'boolean',
+										description:
+											'Whether to download the response even if TLS certificate validation is not possible',
+										displayOptions: {
+											show: {
+												enableTls: [true],
+											},
+										},
+									},
+								],
+							},
+						],
+					},
 				],
 			},
 		],
@@ -212,10 +250,11 @@ export class gRPCNode implements INodeType {
 			async getServices() {
 				let names: string[] = [];
 				const mode = this.getNodeParameter('protoSource', 'auto') as 'auto' | 'url' | 'text';
+				const creds = await makeGrpcCredFromNode.bind(this)();
 				switch (mode) {
 					case 'auto':
 						const location = this.getNodeParameter('location') as string;
-						const client = new GrpcReflection(location, grpc.ChannelCredentials.createInsecure());
+						const client = new GrpcReflection(location, creds);
 						names = await client.listServices();
 						break;
 					case 'url':
@@ -241,7 +280,8 @@ export class gRPCNode implements INodeType {
 				switch (mode) {
 					case 'auto':
 						const location = this.getNodeParameter('location') as string;
-						const client = new GrpcReflection(location, grpc.ChannelCredentials.createInsecure());
+						const creds = await makeGrpcCredFromNode.bind(this)();
+						const client = new GrpcReflection(location, creds);
 						methods = (await client.listMethods(service)).map((m) => m.name);
 						break;
 					case 'url':
@@ -269,7 +309,8 @@ export class gRPCNode implements INodeType {
 				switch (mode) {
 					case 'auto':
 						const location = this.getNodeParameter('location') as string;
-						const client = new GrpcReflection(location, grpc.ChannelCredentials.createInsecure());
+						const creds = await makeGrpcCredFromNode.bind(this)();
+						const client = new GrpcReflection(location, creds);
 						root = (await client.getDescriptorBySymbol(`${service}`)).getProtobufJsRoot();
 						break;
 					case 'url':
@@ -312,7 +353,8 @@ export class gRPCNode implements INodeType {
 		switch (mode) {
 			case 'auto':
 				const location = this.getNodeParameter('location', 0) as string;
-				const client = new GrpcReflection(location, grpc.ChannelCredentials.createInsecure());
+				const creds = await makeGrpcCredFromNode.bind(this)();
+				const client = new GrpcReflection(location, creds);
 				const descriptor = await client.getDescriptorBySymbol(`${service}`);
 				pkg = descriptor.getPackageDefinition();
 				break;

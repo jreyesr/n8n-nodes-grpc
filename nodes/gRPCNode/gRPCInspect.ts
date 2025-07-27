@@ -1,11 +1,16 @@
-import { type FieldType, type INodePropertyOptions } from 'n8n-workflow';
+import {
+	type FieldType,
+	type IExecuteFunctions,
+	ILoadOptionsFunctions,
+	type INodePropertyOptions,
+} from 'n8n-workflow';
 
 const grpc = require('@grpc/grpc-js');
 const protoLoader = require('@grpc/proto-loader');
 import type { AnyDefinition, PackageDefinition, ServiceDefinition } from '@grpc/proto-loader';
 import { Enum, Field, MapField, parse as protoParse, Root, Type } from 'protobufjs';
 import { ServiceClient } from '@grpc/grpc-js/build/src/make-client';
-import { Metadata } from '@grpc/grpc-js';
+import { Metadata, type ChannelCredentials } from '@grpc/grpc-js';
 
 // Insomnia uses this logic to distinguish Services from messages&enums inside packages
 // https://github.com/Kong/insomnia/blob/3bcf4f7f3277a5dacce237b97c49425873174f11/packages/insomnia/src/main/ipc/grpc.ts#L320-L338
@@ -108,16 +113,14 @@ export async function sendMessageToServer(
 	pkg: PackageDefinition,
 	message: any,
 	headers: [{ name: string; value: string }],
+	credentials: ChannelCredentials = grpc.credentials.createInsecure(),
 ): Promise<any[]> {
 	// e.g. grpcbin.GRPCBin, last period separates package from service
 	const separator = service.lastIndexOf('.');
 	const packageName = service.substring(0, separator);
 	const serviceName = service.substring(separator + 1);
 	const clientDef = grpc.loadPackageDefinition(pkg)[packageName];
-	const client: ServiceClient = new clientDef[serviceName](
-		location,
-		grpc.credentials.createInsecure(),
-	);
+	const client: ServiceClient = new clientDef[serviceName](location, credentials);
 
 	return new Promise<any[]>((resolve, reject) => {
 		const args: any[] = [];
@@ -161,4 +164,85 @@ export async function sendMessageToServer(
 			call.on('error', reject);
 		}
 	});
+}
+
+function isExecuteFunctions(x: IExecuteFunctions | ILoadOptionsFunctions): x is IExecuteFunctions {
+	return 'executeWorkflow' in x;
+}
+
+export async function makeGrpcCredFromNode(
+	this: IExecuteFunctions | ILoadOptionsFunctions,
+): Promise<ChannelCredentials> {
+	// return grpc.credentials.createInsecure();
+	const getParamOfFirst = (param: string, defaultValue?: any): any => {
+		if (isExecuteFunctions(this)) {
+			return this.getNodeParameter(param, 0, defaultValue);
+		} else {
+			return this.getNodeParameter(param, defaultValue);
+		}
+	};
+	const tls = getParamOfFirst('options.tls.tls', {
+		enableTls: true,
+		ignoreIssues: false,
+	}) as {
+		enableTls: boolean;
+		ignoreIssues: boolean;
+	};
+	let channelCredentials: ChannelCredentials;
+	if (tls.enableTls) {
+		channelCredentials = grpc.credentials.createSsl(
+			null, // rootCerts, privateKey, certChain
+			null,
+			null,
+			{
+				rejectUnauthorized: !tls.ignoreIssues,
+			},
+		);
+	} else {
+		channelCredentials = grpc.credentials.createInsecure();
+	}
+
+	/*const authType = getParamOfFirst('authentication', 'none') as
+		| 'none'
+		| 'predefinedCredentialType'
+		| 'genericCredentialType';
+	let callCredentialCallback: CallMetadataGenerator | undefined;
+	switch (authType) {
+		case 'none':
+			callCredentialCallback = undefined;
+			break;
+		case 'predefinedCredentialType':
+			const credType = getParamOfFirst('nodeCredentialType') as string;
+			const cred = await this.getCredentials(credType);
+			console.log('CRED', credType, cred);
+			callCredentialCallback = (
+				_params: any,
+				callback: (e: Error | null, metadata: Metadata) => void,
+			) => {
+				const meta = new grpc.Metadata();
+				meta.add('custom-auth-header', 'token');
+				callback(null, meta);
+			};
+			break;
+		case 'genericCredentialType':
+			callCredentialCallback = (
+				_params: any,
+				callback: (e: Error | null, metadata: Metadata) => void,
+			) => {
+				const meta = new grpc.Metadata();
+				meta.add('custom-auth-header', 'token');
+				callback(null, meta);
+			};
+			break;
+	}
+
+	const callCredentials = callCredentialCallback
+		? grpc.credentials.createFromMetadataGenerator(callCredentialCallback)
+		: undefined;
+
+	return grpc.credentials.combineChannelCredentials(
+		channelCredentials,
+		...(callCredentials ? [callCredentials] : []),
+	);*/
+	return channelCredentials;
 }
